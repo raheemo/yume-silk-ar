@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>夢シルク AR デモ</title>
+  <!-- A-Frame + MindAR (image tracking) from CDN. The phone needs internet. -->
+  <script src="https://aframe.io/releases/1.5.0/aframe.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/mind-ar@1.2.5/dist/mindar-image-aframe.prod.js"></script>
+  <style>
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #000; font-family: sans-serif; }
+    #start {
+      position: fixed; inset: 0; z-index: 20; display: flex; flex-direction: column;
+      align-items: center; justify-content: center; gap: 18px; color: #fff; text-align: center;
+      background: #5c1e28; padding: 24px; box-sizing: border-box;
+    }
+    #start h1 { margin: 0; font-size: 34px; color: #ffd678; }
+    #start p { margin: 0; font-size: 16px; line-height: 1.6; }
+    #go {
+      font-size: 20px; padding: 14px 36px; border: none; border-radius: 30px;
+      background: #ffd678; color: #5c1e28; font-weight: bold;
+    }
+    #status { font-size: 14px; min-height: 20px; color: #ffe; }
+    #hint {
+      position: fixed; bottom: 22px; left: 50%; transform: translateX(-50%); z-index: 10;
+      background: rgba(0,0,0,.6); color: #fff; padding: 10px 16px; border-radius: 20px;
+      font-size: 14px; text-align: center; display: none;
+    }
+    #dl { color: #ffd678; font-size: 13px; display: none; }
+  </style>
+</head>
+<body>
+  <div id="start">
+    <h1>夢シルク</h1>
+    <p>ラベルにスマホをかざすと、<br>動画が商品の上で再生されます。</p>
+    <button id="go" style="display:none">スタート / Start</button>
+    <div id="status">カメラを準備中… / Starting camera…</div>
+    <a id="dl" download="targets.mind">targets.mind を保存</a>
+  </div>
+  <div id="hint">ラベルにカメラを向けてください<br>Point the camera at the label</div>
+  
+  <a-scene id="scene"
+    mindar-image="imageTargetSrc: ./targets.mind; autoStart: false; maxTrack: 1; uiScanning: no; uiLoading: no"
+    color-space="sRGB" renderer="colorManagement: true"
+    vr-mode-ui="enabled: false" device-orientation-permission-ui="enabled: false">
+    <a-assets>
+      <video id="vid" src="./demo.mp4" preload="auto" muted playsinline webkit-playsinline loop crossorigin="anonymous"></video>
+    </a-assets>
+    <a-camera position="0 0 0" look-controls="enabled: false"></a-camera>
+    <!-- label is 1200 x 800 (width 1, height 0.667). Video is 16:9 → height 0.5625 -->
+    <a-entity id="target" mindar-image-target="targetIndex: 0">
+      <a-plane src="#vid" width="1" height="0.5625" position="0 0 0.01"></a-plane>
+    </a-entity>
+  </a-scene>
+
+  <script>
+    const statusEl = document.getElementById("status");
+    const hint = document.getElementById("hint");
+    const video = document.getElementById("vid");
+    const CACHE_KEY = "yumesilk-mind-v1";
+
+    // Turn a buffer into a blob URL that MindAR can fetch
+    const toUrl = (buf) => URL.createObjectURL(new Blob([buf], { type: "application/octet-stream" }));
+    const toB64 = (buf) => { let s = ""; const b = new Uint8Array(buf); for (let i = 0; i < b.length; i++) s += String.fromCharCode(b[i]); return btoa(s); };
+    const fromB64 = (str) => { const s = atob(str); const b = new Uint8Array(s.length); for (let i = 0; i < s.length; i++) b[i] = s.charCodeAt(i); return b.buffer; };
+
+    // 1) use targets.mind if it exists, 2) else use a saved copy, 3) else build it from label.jpg on the phone
+    async function getTargetUrl() {
+      try {
+        const r = await fetch("./targets.mind", { cache: "no-store" });
+        if (r.ok) return "./targets.mind";
+      } catch (e) {}
+      try {
+        const saved = localStorage.getItem(CACHE_KEY);
+        if (saved) return toUrl(fromB64(saved));
+      } catch (e) {}
+
+      statusEl.textContent = "ラベルを準備中… (初回のみ 10〜60秒)";
+      const img = new Image();
+      img.src = "./label.jpg";
+      await img.decode();
+      const compiler = new window.MINDAR.IMAGE.Compiler();
+      await compiler.compileImageTargets([img], (p) => {
+        statusEl.textContent = "ラベルを準備中… " + Math.round(p) + "%";
+      });
+      const buf = compiler.exportData();
+      try { localStorage.setItem(CACHE_KEY, toB64(buf)); } catch (e) {}
+      const url = toUrl(buf);
+      const dl = document.getElementById("dl");
+      dl.href = url; dl.style.display = "inline";
+      return url;
+    }
+
+    const goBtn = document.getElementById("go");
+    const scene = document.getElementById("scene");
+    let started = false;
+
+    // Start the AR camera. Runs by itself when the page opens.
+    async function startAR() {
+      if (started) return;
+      started = true;
+      goBtn.style.display = "none";
+      statusEl.textContent = "カメラを準備中… / Starting camera…";
+      // the video is muted, so phones allow it to play without a tap
+      video.muted = true;
+      try { await video.play(); video.pause(); } catch (err) {}
+      try {
+        const url = await getTargetUrl();
+        const ar = scene.systems["mindar-image-system"];
+        ar.imageTargetSrc = url;
+        await ar.start();
+        document.getElementById("start").style.display = "none";
+        hint.style.display = "block";
+      } catch (err) {
+        // backup: if the phone blocks auto start, show the button
+        started = false;
+        statusEl.textContent = "タップして開始 / Tap to start";
+        goBtn.style.display = "inline-block";
+      }
+    }
+
+    // auto start as soon as the 3D scene is ready
+    if (scene.renderStarted) startAR();
+    else scene.addEventListener("renderstart", startAR);
+
+    // backup button (only shown if auto start fails)
+    goBtn.addEventListener("click", startAR);
+
+    // play on the label, pause when the camera moves away
+    const target = document.getElementById("target");
+    target.addEventListener("targetFound", () => { video.play(); hint.style.display = "none"; });
+    target.addEventListener("targetLost", () => { video.pause(); hint.style.display = "block"; });
+
+  </script>
+</body>
+</html>
